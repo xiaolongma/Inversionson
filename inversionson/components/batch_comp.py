@@ -5,6 +5,8 @@ batches and control groups for coming iterations.
 
 from numpy.core.fromnumeric import shape
 from numpy.core.numeric import full
+from tqdm import tqdm
+
 from .component import Component
 import numpy as np
 import h5py
@@ -366,7 +368,8 @@ class BatchComponent(Component):
         if self.comm.project.meshes == "multi-mesh":
             inversion_grid = True
         parameters = self.comm.project.inversion_params
-        for _i, event in enumerate(events):
+        print("Summing Gradients: \n")
+        for _i, event in tqdm(enumerate(events), total=len(events)):
             gradient = self.comm.lasif.find_gradient(
                 iteration=iteration,
                 event=event,
@@ -397,37 +400,22 @@ class BatchComponent(Component):
         print(f"Full grad norm: {full_grad_norm}")
         assert not np.any(np.isnan(full_grad)), "Nan values in full gradient"
         event_quality = {}
-        # I need to create a function for this that I can call with varying full gradients
-        # for event in events:
-        #     gradient = self.comm.lasif.find_gradient(
-        #         iteration=iteration,
-        #         event=event,
-        #         smooth=True,
-        #         inversion_grid=inversion_grid,
-        #     )
-        #     individual_gradient = um.from_h5(gradient)
-
-        #     individual_gradient = self._get_vector_of_values(
-        #         gradient=individual_gradient, parameters=parameters,
-        #     )
-        #     assert not np.any(
-        #         np.isnan(individual_gradient)
-        #     ), f"Nan values in individual_gradient for {event}"
-
-        #     angle = self._compute_angular_change(
-        #         full_gradient=full_grad.reshape(
-        #             full_grad.shape[0] * full_grad.shape[1]
-        #         ),
-        #         full_norm=full_grad_norm,
-        #         individual_gradient=individual_gradient.reshape(
-        #             individual_gradient.shape[0] * individual_gradient.shape[1]
-        #         ),
-        #     )
-        #     print(f"Angle computed for event: {event}: {angle}")
-        #     angular_changes[event] = angle
-        #     event_quality[event] = 0.0
         batch_grad = np.copy(full_grad)
         removal_order = 0
+        # Dropout now.
+        if "it0000" not in iteration:
+            dropped_events = self._dropout(ctrl_group.copy())
+
+        for event in dropped_events:
+            event_quality[event] = 1.0 / 2.0
+            # individual_gradient = um.from_h5(gradient)
+
+            batch_grad = self._remove_individual_grad_from_full_grad(
+                batch_grad, event, unique_indices=unique_indices,
+            )
+            ctrl_group.remove(event)
+            print(f"Event: {event} randomly dropped from ctrl group")
+
         while len(ctrl_group) > min_ctrl:
             removal_order += 1
             event_name, test_batch_grad = self._find_most_useless_event(
@@ -436,18 +424,6 @@ class BatchComponent(Component):
                 events=ctrl_group,
                 unique_indices=unique_indices,
             )
-            # redundant_gradient = min(angular_changes, key=angular_changes.get)
-            # gradient = self.comm.lasif.find_gradient(
-            #     iteration=iteration,
-            #     event=redundant_gradient,
-            #     smooth=True,
-            #     inversion_grid=inversion_grid,
-            # )
-
-            # removal_grad = self._get_vector_of_values(
-            #     gradient=um.from_h5(gradient), parameters=parameters,
-            # )
-            # test_batch_grad -= removal_grad
             angle = self._angle_between(full_grad, test_batch_grad,)
             print(f"Angle between test_batch and full gradient: {angle}")
             if angle >= self.comm.project.maximum_grad_divergence_angle:
@@ -459,35 +435,13 @@ class BatchComponent(Component):
                 # event_quality[event_name] = 1 / len(ctrl_group)
                 ctrl_group.remove(event_name)
                 print(f"{event_name} does not continue to next iteration")
-        if "it0000" not in iteration:
-            grads_dropped = self._dropout(ctrl_group.copy())
-            tmp_event_qual = event_quality.copy()
-            best_non_ctrl_group_event = max(
-                tmp_event_qual, key=tmp_event_qual.get
-            )
-            for grad in grads_dropped:
-                # We replace one event by two to ensure a good angle.
-                non_ctrl_group_event = max(
-                    tmp_event_qual, key=tmp_event_qual.get
-                )
-                print(f"Best non: {best_non_ctrl_group_event}")
-                print(f"Event Quality: {event_quality}")
-                event_quality[grad] = event_quality[best_non_ctrl_group_event]
-                ctrl_group.remove(grad)
-                ctrl_group.append(non_ctrl_group_event)
-                del tmp_event_qual[non_ctrl_group_event]
-                non_ctrl_group_event_2 = max(
-                    tmp_event_qual, key=tmp_event_qual.get
-                )
-                ctrl_group.append(non_ctrl_group_event_2)
-                del tmp_event_qual[non_ctrl_group_event_2]
-                print(f"Event: {grad} randomly dropped from control group.\n")
-                print(f"Replaced by events: {non_ctrl_group_event} \n")
-                print(f" and {non_ctrl_group_event_2}")
+                print(f"Current size of control group: {len(ctrl_group)}")
 
         for key, val in event_quality.items():
             self.comm.project.event_quality[key] = val
         print(f"Control batch events: {ctrl_group}")
+        print("\n \n ============================= \n \n")
+        print(f"Number of Control group events: {len(ctrl_group)}")
 
         return ctrl_group
 
